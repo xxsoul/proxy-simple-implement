@@ -20,9 +20,10 @@ type Socks5ProxyRequest struct {
 	Rsv     byte
 	Atyp    byte
 	DstAddr []byte
-	DstPort byte
+	DstPort []byte
 }
 
+// Socks5ProxyResponse socks代理请求回应
 type Socks5ProxyResponse struct {
 	Ver     byte
 	Rep     byte
