@@ -22,9 +22,9 @@ type Socks5ProxyServer struct {
 // 2.单线程处理单个请求，请求关闭前不处理其他代理请求
 func (socksServer *Socks5ProxyServer) TCPServer() {
 	log.Printf("socks5 proxy server start, listen port: %d", socksServer.Port)
-	ln, err := net.ListenTCP("TCP", &net.TCPAddr{IP: net.IPv4(0, 0, 0, 0), Port: socksServer.Port})
+	ln, err := net.ListenTCP("tcp", &net.TCPAddr{IP: net.IPv4(0, 0, 0, 0), Port: socksServer.Port})
 	if err != nil {
-		log.Printf("error!, msg is %s", err.Error())
+		log.Printf("error!msg is %s", err.Error())
 		return
 	}
 
@@ -47,12 +47,13 @@ func (socksServer *Socks5ProxyServer) handleTCPConnect(cliConn *net.TCPConn) {
 	log.Printf("begin handle proxy connect, ip is %s，begin auth version negotitate", cliConn.RemoteAddr().String())
 
 	//连接建立后，客户端发送socks5版本认证请求
-	readBuf, err := ioutil.ReadAll(cliConn)
+	readBuf := make([]byte, 200)
+	readBufCount, err := cliConn.Read(readBuf)
 	if err != nil {
 		log.Printf("read auth version error! msg is %s", err.Error())
 		return
 	}
-	authReq, err := verifyAuthMethodRequest(readBuf)
+	authReq, err := verifyAuthMethodRequest(readBuf[:readBufCount])
 	if err != nil {
 		log.Printf("verify auth method request error! msg is %s", err.Error())
 		return
@@ -64,12 +65,13 @@ func (socksServer *Socks5ProxyServer) handleTCPConnect(cliConn *net.TCPConn) {
 	cliConn.Write(writeBuf.Bytes())
 
 	log.Printf("auth version negotiate done! begin proxy detail request")
-	readBuf, err = ioutil.ReadAll(cliConn)
+	readBuf = make([]byte, 200)
+	readBufCount, err = cliConn.Read(readBuf)
 	if err != nil {
 		log.Printf("read proxy request error! msg is %s", err.Error())
 		return
 	}
-	proxyReq, err := verifyProxyRequest(readBuf)
+	proxyReq, err := verifyProxyRequest(readBuf[:readBufCount])
 	if err != nil {
 		log.Printf("verify proxy request request error! msg is %s", err.Error())
 		return
@@ -107,7 +109,7 @@ func (socksServer *Socks5ProxyServer) handleTCPConnect(cliConn *net.TCPConn) {
 	}
 
 	log.Printf("begin connect remote, addres is %s", addres)
-	remoteConn, err := net.Dial("TCP", addres)
+	remoteConn, err := net.Dial("tcp", addres)
 	if err != nil {
 		log.Printf("remote connect fail, msg is %s", err.Error())
 		return

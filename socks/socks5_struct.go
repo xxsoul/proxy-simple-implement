@@ -30,5 +30,5 @@ type Socks5ProxyResponse struct {
 	Rsv     byte
 	Atyp    byte
 	BndAddr []byte
-	BndPort byte
+	BndPort []byte
 }

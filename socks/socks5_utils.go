@@ -50,7 +50,7 @@ func verifyProxyRequest(buf []byte) (*Socks5ProxyRequest, error) {
 		seek = 16
 	}
 	req.DstAddr = buf[4 : 4+seek]
-	req.DstPort = buf[4+seek+1:]
+	req.DstPort = buf[4+seek:]
 
 	return &req, nil
 }
