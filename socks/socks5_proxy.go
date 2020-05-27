@@ -57,8 +57,8 @@ func (socksServer *Socks5ProxyServer) handleTCPConnect(cliConn *net.TCPConn) {
 
 	// 连接成功，准备交换数据
 
-	cliReadChan := make(chan []byte)
-	remoteReadChan := make(chan []byte)
+	cliReadChan := make(chan bytes.Buffer)
+	remoteReadChan := make(chan bytes.Buffer)
 
 	readFromCliFunc := func() {
 		readBuf := make([]byte, socksServer.ReadBufLen) // 初始化一个32kb读缓冲区
@@ -75,7 +75,7 @@ func (socksServer *Socks5ProxyServer) handleTCPConnect(cliConn *net.TCPConn) {
 			}
 			readBuf = readBuf[:0]
 		}
-		cliReadChan <- writeBuf.Bytes()
+		cliReadChan <- *writeBuf
 	}
 
 	readFromRemoteFunc := func() {
@@ -93,13 +93,8 @@ func (socksServer *Socks5ProxyServer) handleTCPConnect(cliConn *net.TCPConn) {
 			}
 			readBuf = readBuf[:0]
 		}
-		remoteReadChan <- writeBuf.Bytes()
+		remoteReadChan <- *writeBuf
 	}
-
-	defer func() {
-		close(remoteReadChan)
-		close(cliReadChan)
-	}()
 
 	go readFromCliFunc()
 	go readFromRemoteFunc()
@@ -111,7 +106,7 @@ conLoop:
 				log.Printf("client read channel closed")
 			}
 
-			c2rCount, c2rErr := remoteConn.Write(buf)
+			c2rCount, c2rErr := remoteConn.Write(buf.Bytes())
 			if c2rErr != nil || c2rCount < 1 {
 				log.Printf("data client -> remote exchange fail! msg is %s", err)
 				break conLoop
@@ -123,7 +118,7 @@ conLoop:
 				log.Printf("remote read channel closed")
 			}
 
-			r2cCount, r2cErr := cliConn.Write(buf)
+			r2cCount, r2cErr := cliConn.Write(buf.Bytes())
 			if r2cErr != nil || r2cCount < 1 {
 				log.Printf("data client <- remote exchange fail! msg is %s", err)
 				break conLoop
