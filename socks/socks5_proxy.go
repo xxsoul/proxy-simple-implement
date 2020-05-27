@@ -15,7 +15,8 @@ var (
 // Socks5ProxyServer socks5代理服务
 // 简单实现，单线程，只监听0.0.0.0:port
 type Socks5ProxyServer struct {
-	Port int
+	Port       int
+	ReadBufLen int
 }
 
 // TCPServer 启动socks5TCP协议
@@ -56,19 +57,80 @@ func (socksServer *Socks5ProxyServer) handleTCPConnect(cliConn *net.TCPConn) {
 
 	// 连接成功，准备交换数据
 
+	cliReadChan := make(chan []byte)
+	remoteReadChan := make(chan []byte)
+
+	readFromCliFunc := func() {
+		readBuf := make([]byte, socksServer.ReadBufLen) // 初始化一个32kb读缓冲区
+		writeBuf := new(bytes.Buffer)
+
+		for {
+			readLen, readErr := cliConn.Read(readBuf)
+			if readLen < 1 || readErr != nil {
+				break
+			}
+			writeBuf.Write(readBuf[0:readLen])
+			if readLen < socksServer.ReadBufLen {
+				break
+			}
+			readBuf = readBuf[:0]
+		}
+		cliReadChan <- writeBuf.Bytes()
+	}
+
+	readFromRemoteFunc := func() {
+		readBuf := make([]byte, socksServer.ReadBufLen) // 初始化一个32kb读缓冲区
+		writeBuf := new(bytes.Buffer)
+
+		for {
+			readLen, readErr := remoteConn.Read(readBuf)
+			if readLen < 1 || readErr != nil {
+				break
+			}
+			writeBuf.Write(readBuf[0:readLen])
+			if readLen < socksServer.ReadBufLen {
+				break
+			}
+			readBuf = readBuf[:0]
+		}
+		remoteReadChan <- writeBuf.Bytes()
+	}
+
+	defer func() {
+		close(remoteReadChan)
+		close(cliReadChan)
+	}()
+
+	go readFromCliFunc()
+	go readFromRemoteFunc()
+conLoop:
 	for {
-		c2rCount, c2rErr := CopyStream(remoteConn, cliConn)
-		if c2rErr != nil || c2rCount < 1 {
-			log.Printf("data client -> remote exchange fail! msg is %s", err)
-			break
+		select {
+		case buf, ok := <-cliReadChan:
+			if !ok {
+				log.Printf("client read channel closed")
+			}
+
+			c2rCount, c2rErr := remoteConn.Write(buf)
+			if c2rErr != nil || c2rCount < 1 {
+				log.Printf("data client -> remote exchange fail! msg is %s", err)
+				break conLoop
+			}
+			log.Printf("data client -> remote exchange success! size is %d", c2rCount)
+			go readFromCliFunc() // 重新读取
+		case buf, ok := <-remoteReadChan:
+			if !ok {
+				log.Printf("remote read channel closed")
+			}
+
+			r2cCount, r2cErr := cliConn.Write(buf)
+			if r2cErr != nil || r2cCount < 1 {
+				log.Printf("data client <- remote exchange fail! msg is %s", err)
+				break conLoop
+			}
+			log.Printf("data client <- remote exchange success! size is %d", r2cCount)
+			go readFromRemoteFunc() // 重新读取
 		}
-		log.Printf("data client -> remote exchange success! size is %d", c2rCount)
-		r2cCount, r2cErr := CopyStream(cliConn, remoteConn)
-		if r2cErr != nil || r2cCount < 1 {
-			log.Printf("data client <- remote exchange fail! msg is %s", err)
-			break
-		}
-		log.Printf("data client <- remote exchange success! size is %d", r2cCount)
 	}
 
 	log.Printf("proxy close")
