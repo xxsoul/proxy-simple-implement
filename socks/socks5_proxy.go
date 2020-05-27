@@ -4,12 +4,13 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"net"
 )
 
-var ()
+var (
+	defaultEndian = binary.BigEndian
+)
 
 // Socks5ProxyServer socks5代理服务
 // 简单实现，单线程，只监听0.0.0.0:port
@@ -44,103 +45,30 @@ func (socksServer *Socks5ProxyServer) TCPServer() {
 func (socksServer *Socks5ProxyServer) handleTCPConnect(cliConn *net.TCPConn) {
 	defer cliConn.Close() // 关闭连接
 
-	log.Printf("begin handle proxy connect, ip is %s，begin auth version negotitate", cliConn.RemoteAddr().String())
-
-	//连接建立后，客户端发送socks5版本认证请求
-	readBuf := make([]byte, 200)
-	readBufCount, err := cliConn.Read(readBuf)
+	remoteConn, err := socksServer.prepareProxyConnect(cliConn)
 	if err != nil {
-		log.Printf("read auth version error! msg is %s", err.Error())
-		return
-	}
-	authReq, err := verifyAuthMethodRequest(readBuf[:readBufCount])
-	if err != nil {
-		log.Printf("verify auth method request error! msg is %s", err.Error())
+		log.Printf("prepare proxy connect error! msg is %s", err.Error())
 		return
 	}
 
-	authRes := socksServer.switchAuthMethod(*(authReq))
-	writeBuf := &bytes.Buffer{}
-	binary.Write(writeBuf, binary.BigEndian, authRes) // 网络字节序通常为大端字节序
-	cliConn.Write(writeBuf.Bytes())
-
-	log.Printf("auth version negotiate done! begin proxy detail request")
-	readBuf = make([]byte, 200)
-	readBufCount, err = cliConn.Read(readBuf)
-	if err != nil {
-		log.Printf("read proxy request error! msg is %s", err.Error())
-		return
-	}
-	proxyReq, err := verifyProxyRequest(readBuf[:readBufCount])
-	if err != nil {
-		log.Printf("verify proxy request request error! msg is %s", err.Error())
-		return
-	}
-
-	if proxyReq.Cmd != 0x01 {
-		log.Printf("commend %x not implement", proxyReq.Cmd)
-		proxyRes := Socks5ProxyResponse{
-			Ver:  0x05,
-			Rep:  0x07,
-			Rsv:  0x00,
-			Atyp: proxyReq.Atyp,
-		}
-
-		writeBuf = &bytes.Buffer{}
-		binary.Write(writeBuf, binary.BigEndian, proxyRes)
-		cliConn.Write(writeBuf.Bytes())
-
-		return
-	}
-
-	// 连接目标服务器
-	addres := ""
-	switch proxyReq.Atyp {
-	case 0x01:
-		addres = fmt.Sprintf("%s:%d", net.IPv4(proxyReq.DstAddr[0], proxyReq.DstAddr[1], proxyReq.DstAddr[2], proxyReq.DstAddr[3]).String(), binary.BigEndian.Uint16(proxyReq.DstPort))
-	case 0x03:
-		addres = fmt.Sprintf("%s:%d", string(proxyReq.DstAddr[1:]), binary.BigEndian.Uint16(proxyReq.DstPort))
-	case 0x04:
-		addres = fmt.Sprintf("[%s:%s:%s:%s:%s:%s:%s:%s]:%d",
-			string(proxyReq.DstAddr[0:2]), string(proxyReq.DstAddr[2:4]),
-			string(proxyReq.DstAddr[4:6]), string(proxyReq.DstAddr[6:8]),
-			string(proxyReq.DstAddr[8:10]), string(proxyReq.DstAddr[10:12]),
-			string(proxyReq.DstAddr[12:14]), string(proxyReq.DstAddr[14:16]), binary.BigEndian.Uint16(proxyReq.DstPort))
-	}
-
-	log.Printf("begin connect remote, addres is %s", addres)
-	remoteConn, err := net.Dial("tcp", addres)
-	if err != nil {
-		log.Printf("remote connect fail, msg is %s", err.Error())
-		return
-	}
 	defer remoteConn.Close() //关闭远程连接，由于defer是压栈操作执行的，远程连接比代理连接先释放
 	log.Printf("remote connect success, reday for exchange data")
+
 	// 连接成功，准备交换数据
 
-	for cliReqBuf, err := ioutil.ReadAll(cliConn); err != nil && len(cliReqBuf) > 0; {
-		// 收到客户端数据，转发到服务端
-		_, rmtReqErr := remoteConn.Write(cliReqBuf)
-		if rmtReqErr != nil {
-			log.Printf("send data to remote fail! msg is %s", rmtReqErr.Error())
+	for {
+		c2rCount, c2rErr := CopyStream(remoteConn, cliConn)
+		if c2rErr != nil || c2rCount < 1 {
+			log.Printf("data client -> remote exchange fail! msg is %s", err)
 			break
 		}
-
-		rmtResDataBuf, rmtResErr := ioutil.ReadAll(remoteConn)
-		if rmtResErr != nil || len(rmtResDataBuf) < 1 {
-			errMsg := "nil"
-			if rmtResErr != nil {
-				errMsg = rmtResErr.Error()
-			}
-			log.Printf("receive response from remote fail or response length is 0! error msg is %s", errMsg)
+		log.Printf("data client -> remote exchange success! size is %d", c2rCount)
+		r2cCount, r2cErr := CopyStream(cliConn, remoteConn)
+		if r2cErr != nil || r2cCount < 1 {
+			log.Printf("data client <- remote exchange fail! msg is %s", err)
 			break
 		}
-
-		_, cliResErr := cliConn.Write(rmtResDataBuf)
-		if cliResErr != nil {
-			log.Printf("send response to client fail! msg is %s", cliResErr.Error())
-			break
-		}
+		log.Printf("data client <- remote exchange success! size is %d", r2cCount)
 	}
 
 	log.Printf("proxy close")
@@ -152,4 +80,95 @@ func (socksServer *Socks5ProxyServer) switchAuthMethod(authRequest Socks5AuthMet
 		Ver:    0x05,
 		Method: 0x00,
 	}
+}
+
+// prepareProxyConnect 准备代理连接，包括了实际交换代理数据前的认证版本部分
+func (socksServer *Socks5ProxyServer) prepareProxyConnect(cliConn *net.TCPConn) (net.Conn, error) {
+	//连接建立后，客户端发送socks5版本认证请求
+	log.Printf("begin handle proxy connect, ip is %s，begin auth version negotitate", cliConn.RemoteAddr().String())
+	readBuf := make([]byte, 50)
+	readBufCount, err := cliConn.Read(readBuf)
+	if err != nil {
+		return nil, err
+	}
+	authReq, err := verifyAuthMethodRequest(readBuf[:readBufCount])
+	if err != nil {
+		return nil, err
+	}
+
+	authRes := socksServer.switchAuthMethod(*(authReq))
+	writeBuf := &bytes.Buffer{}
+	binary.Write(writeBuf, defaultEndian, authRes) // 网络字节序通常为大端字节序，另外，这个方法不能用于写入字段中带切片的结构
+	cliConn.Write(writeBuf.Bytes())
+
+	log.Printf("auth version negotiate done! begin proxy detail request")
+	readBuf = make([]byte, 200)
+	readBufCount, err = cliConn.Read(readBuf)
+	if err != nil {
+		return nil, err
+	}
+	proxyReq, err := verifyProxyRequest(readBuf[:readBufCount])
+	if err != nil {
+		return nil, err
+	}
+
+	// 判断命令是否支持
+	if proxyReq.Cmd != 0x01 {
+		log.Printf("commend %x not implement", proxyReq.Cmd)
+		proxyRes := Socks5ProxyResponse{
+			Ver:  0x05,
+			Rep:  0x07,
+			Rsv:  0x00,
+			Atyp: proxyReq.Atyp,
+		}
+		cliConn.Write(proxyRes.toByte())
+
+		return nil, fmt.Errorf("commend %x not implement", proxyReq.Cmd)
+	}
+
+	remoteConn, remoteErr := socksServer.connectRemoteTCP(proxyReq)
+
+	proxyRes := Socks5ProxyResponse{
+		Ver:     0x05,
+		Rsv:     0x00,
+		Atyp:    proxyReq.Atyp,
+		BndAddr: proxyReq.DstAddr,
+		BndPort: proxyReq.DstPort,
+	}
+	if remoteErr != nil {
+		proxyRes.Rep = 0x04
+	} else {
+		proxyRes.Rep = 0x00
+	}
+
+	// 回复proxyResponse
+	cliConn.Write(proxyRes.toByte())
+
+	return remoteConn, remoteErr
+}
+
+// connectRemoteTCP 使用tcp方式连接远程服务器
+// todo: 需要考虑到如果下一步要连接的是二级代理该怎么办？
+func (socksServer *Socks5ProxyServer) connectRemoteTCP(proxyReq *Socks5ProxyRequest) (net.Conn, error) {
+	// 连接目标服务器
+	addres := ""
+	switch proxyReq.Atyp {
+	case 0x01:
+		addres = fmt.Sprintf("%s:%d", net.IPv4(proxyReq.DstAddr[0], proxyReq.DstAddr[1], proxyReq.DstAddr[2], proxyReq.DstAddr[3]).String(), defaultEndian.Uint16(proxyReq.DstPort))
+	case 0x03:
+		addres = fmt.Sprintf("%s:%d", string(proxyReq.DstAddr[1:]), defaultEndian.Uint16(proxyReq.DstPort))
+	case 0x04:
+		addres = fmt.Sprintf("[%s:%s:%s:%s:%s:%s:%s:%s]:%d",
+			string(proxyReq.DstAddr[0:2]), string(proxyReq.DstAddr[2:4]),
+			string(proxyReq.DstAddr[4:6]), string(proxyReq.DstAddr[6:8]),
+			string(proxyReq.DstAddr[8:10]), string(proxyReq.DstAddr[10:12]),
+			string(proxyReq.DstAddr[12:14]), string(proxyReq.DstAddr[14:16]), defaultEndian.Uint16(proxyReq.DstPort))
+	}
+
+	log.Printf("begin connect remote, addres is %s", addres)
+	remoteConn, err := net.Dial("tcp", addres)
+	if err != nil {
+		return nil, err
+	}
+	return remoteConn, err
 }

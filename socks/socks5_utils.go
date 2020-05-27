@@ -1,8 +1,10 @@
 package socks
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"io"
 )
 
 // verifyAuthMethodRequest 读取并校验给定的流（byte数组），解析为Socks5AuthMethodRequest*
@@ -53,4 +55,30 @@ func verifyProxyRequest(buf []byte) (*Socks5ProxyRequest, error) {
 	req.DstPort = buf[4+seek:]
 
 	return &req, nil
+}
+
+// CopyStream 从src里读取流并写入到dst中
+func CopyStream(dst io.Writer, src io.Reader) (int64, error) {
+	bufLen := 327680
+
+	writeBuf := &bytes.Buffer{}
+	readBuf := make([]byte, bufLen) // 初始化一个32kb读缓冲区
+
+	for {
+		readLen, readErr := src.Read(readBuf)
+		if readLen < 1 || readErr != nil {
+			return 0, readErr
+		}
+		writeBuf.Write(readBuf[0:readLen])
+
+		if readLen < bufLen {
+			break
+		}
+		readBuf = readBuf[:0]
+	}
+
+	writeByte := writeBuf.Bytes()
+	writeLen, writeErr := dst.Write(writeByte)
+
+	return int64(writeLen), writeErr
 }
