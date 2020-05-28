@@ -38,7 +38,7 @@ func (ss *Socks5ProxyServer) TCPServer() {
 			log.Printf("accept error!, msg is %s", err.Error())
 		}
 
-		ss.handleProxyConnect(conn)
+		go ss.handleProxyConnect(conn)
 	}
 }
 
