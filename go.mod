@@ -1,3 +1,3 @@
-module proxy_simple_implement
+module proxy-simple-implement
 
 go 1.13

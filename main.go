@@ -1,6 +1,6 @@
 package main
 
-import "proxy_simple_implement/socks"
+import "proxy-simple-implement/socks"
 
 func main() {
 	socksServer := &socks.Socks5ProxyServer{
