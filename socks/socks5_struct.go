@@ -1,7 +1,5 @@
 package socks
 
-import "bytes"
-
 // Socks5AuthMethodRequest socks5代理认证方法请求
 type Socks5AuthMethodRequest struct {
 	Ver      byte
@@ -33,16 +31,4 @@ type Socks5ProxyResponse struct {
 	Atyp    byte
 	BndAddr []byte
 	BndPort []byte
-}
-
-func (proxyRes Socks5ProxyResponse) toByte() []byte {
-	proxyResBuf := &bytes.Buffer{}
-	proxyResBuf.WriteByte(proxyRes.Ver)
-	proxyResBuf.WriteByte(proxyRes.Rep)
-	proxyResBuf.WriteByte(proxyRes.Rsv)
-	proxyResBuf.WriteByte(proxyRes.Atyp)
-	proxyResBuf.Write(proxyRes.BndAddr)
-	proxyResBuf.Write(proxyRes.BndPort)
-
-	return proxyResBuf.Bytes()
 }

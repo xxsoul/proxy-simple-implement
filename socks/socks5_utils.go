@@ -4,8 +4,21 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"io"
+	"net"
 )
+
+// toByte Socks5ProxyResponse结构体序列化为[]byte
+func (proxyRes Socks5ProxyResponse) toByte() []byte {
+	proxyResBuf := &bytes.Buffer{}
+	proxyResBuf.WriteByte(proxyRes.Ver)
+	proxyResBuf.WriteByte(proxyRes.Rep)
+	proxyResBuf.WriteByte(proxyRes.Rsv)
+	proxyResBuf.WriteByte(proxyRes.Atyp)
+	proxyResBuf.Write(proxyRes.BndAddr)
+	proxyResBuf.Write(proxyRes.BndPort)
+
+	return proxyResBuf.Bytes()
+}
 
 // verifyAuthMethodRequest 读取并校验给定的流（byte数组），解析为Socks5AuthMethodRequest*
 func verifyAuthMethodRequest(buf []byte) (*Socks5AuthMethodRequest, error) {
@@ -57,28 +70,54 @@ func verifyProxyRequest(buf []byte) (*Socks5ProxyRequest, error) {
 	return &req, nil
 }
 
-// CopyStream 从src里读取流并写入到dst中
-func CopyStream(dst io.Writer, src io.Reader) (int64, error) {
-	bufLen := 327680
+// resolveProxyRequestToAddr 解析代理请求中目标地址为字符串
+func resolveProxyRequestToAddr(proxyReq Socks5ProxyRequest) string {
+	addres := ""
+	switch proxyReq.Atyp {
+	case 0x01:
+		addres = fmt.Sprintf("%s:%d", net.IPv4(proxyReq.DstAddr[0], proxyReq.DstAddr[1], proxyReq.DstAddr[2], proxyReq.DstAddr[3]).String(), defaultEndian.Uint16(proxyReq.DstPort))
+	case 0x03:
+		addres = fmt.Sprintf("%s:%d", string(proxyReq.DstAddr[1:]), defaultEndian.Uint16(proxyReq.DstPort))
+	case 0x04:
+		addres = fmt.Sprintf("[%s:%s:%s:%s:%s:%s:%s:%s]:%d",
+			string(proxyReq.DstAddr[0:2]), string(proxyReq.DstAddr[2:4]),
+			string(proxyReq.DstAddr[4:6]), string(proxyReq.DstAddr[6:8]),
+			string(proxyReq.DstAddr[8:10]), string(proxyReq.DstAddr[10:12]),
+			string(proxyReq.DstAddr[12:14]), string(proxyReq.DstAddr[14:16]), defaultEndian.Uint16(proxyReq.DstPort))
+	}
 
-	writeBuf := &bytes.Buffer{}
-	readBuf := make([]byte, bufLen) // 初始化一个32kb读缓冲区
+	return addres
+}
+
+// readConnectToChannel 从网络流中读取数据发送到channel中
+func (ss *Socks5ProxyServer) readConnectToChannel(conn net.Conn, dataChan chan bytes.Buffer) {
+	writeBuf, readErr := ss.readConnect(conn)
+
+	if readErr != nil {
+		close(dataChan) // 通过关闭channel，通知外部select结束
+		return
+	}
+
+	dataChan <- *writeBuf
+}
+
+// readConnect 从流中读取数据，如果读取出错则关闭流通知调用方链接出错，将读取到的数据写入缓冲区并返回
+func (ss *Socks5ProxyServer) readConnect(conn net.Conn) (*bytes.Buffer, error) {
+	readBuf := make([]byte, ss.ReadBufLen)
+	writeBuf := new(bytes.Buffer)
 
 	for {
-		readLen, readErr := src.Read(readBuf)
-		if readLen < 1 || readErr != nil {
-			return 0, readErr
+		readLen, readErr := conn.Read(readBuf)
+		// 对于readErr!=nil，可以认为读取出错或链接被关闭，直接退出方法，其他情况一律拷贝流
+		if readErr != nil {
+			return nil, readErr
 		}
-		writeBuf.Write(readBuf[0:readLen])
 
-		if readLen < bufLen {
+		writeBuf.Write(readBuf[0:readLen])
+		if readLen < ss.ReadBufLen {
 			break
 		}
 		readBuf = readBuf[:0]
 	}
-
-	writeByte := writeBuf.Bytes()
-	writeLen, writeErr := dst.Write(writeByte)
-
-	return int64(writeLen), writeErr
+	return writeBuf, nil
 }
