@@ -60,71 +60,39 @@ func (socksServer *Socks5ProxyServer) handleTCPConnect(cliConn *net.TCPConn) {
 	cliReadChan := make(chan bytes.Buffer)
 	remoteReadChan := make(chan bytes.Buffer)
 
-	readFromCliFunc := func() {
-		readBuf := make([]byte, socksServer.ReadBufLen) // 初始化一个32kb读缓冲区
-		writeBuf := new(bytes.Buffer)
-
-		for {
-			readLen, readErr := cliConn.Read(readBuf)
-			if readLen < 1 || readErr != nil {
-				break
-			}
-			writeBuf.Write(readBuf[0:readLen])
-			if readLen < socksServer.ReadBufLen {
-				break
-			}
-			readBuf = readBuf[:0]
-		}
-		cliReadChan <- *writeBuf
-	}
-
-	readFromRemoteFunc := func() {
-		readBuf := make([]byte, socksServer.ReadBufLen) // 初始化一个32kb读缓冲区
-		writeBuf := new(bytes.Buffer)
-
-		for {
-			readLen, readErr := remoteConn.Read(readBuf)
-			if readLen < 1 || readErr != nil {
-				break
-			}
-			writeBuf.Write(readBuf[0:readLen])
-			if readLen < socksServer.ReadBufLen {
-				break
-			}
-			readBuf = readBuf[:0]
-		}
-		remoteReadChan <- *writeBuf
-	}
-
-	go readFromCliFunc()
-	go readFromRemoteFunc()
+	go socksServer.readFromConnect(cliConn, cliReadChan)
+	go socksServer.readFromConnect(remoteConn, remoteReadChan)
 conLoop:
 	for {
 		select {
 		case buf, ok := <-cliReadChan:
 			if !ok {
 				log.Printf("client read channel closed")
+				break conLoop
 			}
 
 			c2rCount, c2rErr := remoteConn.Write(buf.Bytes())
-			if c2rErr != nil || c2rCount < 1 {
+			if c2rErr != nil {
 				log.Printf("data client -> remote exchange fail! msg is %s", err)
 				break conLoop
 			}
 			log.Printf("data client -> remote exchange success! size is %d", c2rCount)
-			go readFromCliFunc() // 重新读取
+			// go readFromCliFunc()
+			go socksServer.readFromConnect(cliConn, cliReadChan) // 重新读取
 		case buf, ok := <-remoteReadChan:
 			if !ok {
 				log.Printf("remote read channel closed")
+				break conLoop
 			}
 
 			r2cCount, r2cErr := cliConn.Write(buf.Bytes())
-			if r2cErr != nil || r2cCount < 1 {
+			if r2cErr != nil {
 				log.Printf("data client <- remote exchange fail! msg is %s", err)
 				break conLoop
 			}
 			log.Printf("data client <- remote exchange success! size is %d", r2cCount)
-			go readFromRemoteFunc() // 重新读取
+			// go readFromRemoteFunc()
+			go socksServer.readFromConnect(remoteConn, remoteReadChan) // 重新读取
 		}
 	}
 
@@ -140,7 +108,7 @@ func (socksServer *Socks5ProxyServer) switchAuthMethod(authRequest Socks5AuthMet
 }
 
 // prepareProxyConnect 准备代理连接，包括了实际交换代理数据前的认证版本部分
-func (socksServer *Socks5ProxyServer) prepareProxyConnect(cliConn *net.TCPConn) (net.Conn, error) {
+func (socksServer *Socks5ProxyServer) prepareProxyConnect(cliConn *net.TCPConn) (*net.TCPConn, error) {
 	//连接建立后，客户端发送socks5版本认证请求
 	log.Printf("begin handle proxy connect, ip is %s，begin auth version negotitate", cliConn.RemoteAddr().String())
 	readBuf := make([]byte, 50)
@@ -206,7 +174,7 @@ func (socksServer *Socks5ProxyServer) prepareProxyConnect(cliConn *net.TCPConn) 
 
 // connectRemoteTCP 使用tcp方式连接远程服务器
 // todo: 需要考虑到如果下一步要连接的是二级代理该怎么办？
-func (socksServer *Socks5ProxyServer) connectRemoteTCP(proxyReq *Socks5ProxyRequest) (net.Conn, error) {
+func (socksServer *Socks5ProxyServer) connectRemoteTCP(proxyReq *Socks5ProxyRequest) (*net.TCPConn, error) {
 	// 连接目标服务器
 	addres := ""
 	switch proxyReq.Atyp {
@@ -223,9 +191,36 @@ func (socksServer *Socks5ProxyServer) connectRemoteTCP(proxyReq *Socks5ProxyRequ
 	}
 
 	log.Printf("begin connect remote, addres is %s", addres)
-	remoteConn, err := net.Dial("tcp", addres)
+	remoteAddr, addrErr := net.ResolveTCPAddr("tcp4", addres)
+	if addrErr != nil {
+		return nil, addrErr
+	}
+
+	remoteConn, err := net.DialTCP("tcp", nil, remoteAddr)
 	if err != nil {
 		return nil, err
 	}
 	return remoteConn, err
+}
+
+// readFromConnect 从流中读取数据，如果读取出错则关闭流通知调用方链接出错，将读取到的数据写入缓冲区并发送到channel中
+func (socksServer *Socks5ProxyServer) readFromConnect(conn net.Conn, dataChan chan bytes.Buffer) {
+	readBuf := make([]byte, socksServer.ReadBufLen)
+	writeBuf := new(bytes.Buffer)
+
+	for {
+		readLen, readErr := conn.Read(readBuf)
+		// 对于readErr!=nil，可以认为读取出错或链接被关闭，直接退出方法，其他情况一律拷贝流
+		if readErr != nil {
+			close(dataChan) // 通过关闭channel，通知外部select结束
+			return
+		}
+
+		writeBuf.Write(readBuf[0:readLen])
+		if readLen < socksServer.ReadBufLen {
+			break
+		}
+		readBuf = readBuf[:0]
+	}
+	dataChan <- *writeBuf
 }
